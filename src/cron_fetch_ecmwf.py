@@ -55,6 +55,7 @@ from ecmwf_common import (  # noqa: E402
     RECOMMENDED_PARAMS,
     STEPS_MAIN,
     steps_for_run,
+    retry_call,
     setup_proxy,
 )
 
@@ -111,30 +112,39 @@ def download_with_retry(
     返回: True=成功, False=失败
     """
     log = logger or logging.getLogger(__name__)
-    
-    for attempt in range(1, retry + 1):
-        try:
-            log.info(f"[尝试 {attempt}/{retry}] 下载 {len(params)} 变量 × {len(steps)} 步长 ...")
-            result = client.retrieve(
-                type="fc",
-                date=date,
-                time=run_time,
-                step=steps,
-                levtype="sfc",
-                param=params,
-                target=str(outfile),
-            )
-            size_mb = outfile.stat().st_size / 1e6 if outfile.exists() else 0
-            log.info(f"✓ 下载成功 | 起报: {result.datetime} | 大小: {size_mb:.1f} MB")
-            return True
-        except Exception as e:
-            log.error(f"✗ 下载失败 (尝试 {attempt}/{retry}): {e}")
-            if attempt < retry:
-                log.info(f"  等待 {retry_delay} 秒后重试...")
-                time.sleep(retry_delay)
-            else:
-                log.error(f"  已达到最大重试次数，放弃。")
-                return False
+    attempt_no = {"n": 0}
+
+    def _fetch():
+        attempt_no["n"] += 1
+        log.info(f"[尝试 {attempt_no['n']}/{retry}] 下载 {len(params)} 变量 × {len(steps)} 步长 ...")
+        return client.retrieve(
+            type="fc",
+            date=date,
+            time=run_time,
+            step=steps,
+            levtype="sfc",
+            param=params,
+            target=str(outfile),
+        )
+
+    def _cleanup():
+        if outfile.exists():
+            outfile.unlink()
+
+    try:
+        result = retry_call(
+            _fetch,
+            retries=retry,
+            delay=retry_delay,
+            logger=log,
+            cleanup=_cleanup,
+        )
+    except Exception:
+        return False
+
+    size_mb = outfile.stat().st_size / 1e6 if outfile.exists() else 0
+    log.info(f"✓ 下载成功 | 起报: {result.datetime} | 大小: {size_mb:.1f} MB")
+    return True
     return False
 
 

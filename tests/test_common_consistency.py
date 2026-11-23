@@ -122,6 +122,19 @@ def main() -> int:
         "def detect_system_proxy" not in (SRC / "cron_fetch_era5.py").read_text(),
     )
 
+    check(
+        "两个下载脚本都经由 retry_call 重试",
+        "retry_call(" in dl and "retry_call(" in cr,
+    )
+    check(
+        "cron_fetch_ecmwf.py 无本地重试循环",
+        "for attempt in range(1, retry + 1)" not in cr,
+    )
+    check(
+        "download_ecmwf.py 暴露 --retry / --retry-delay",
+        '"--retry"' in dl and '"--retry-delay"' in dl,
+    )
+
     # ── 文档中不得残留 240h / 1h 步长表述 ──────────────────
     for md in sorted((ROOT / "docs").glob("*.md")):
         text = md.read_text()

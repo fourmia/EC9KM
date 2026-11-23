@@ -54,6 +54,7 @@ from ecmwf_common import (  # noqa: E402
     LEVELS_PL,
     STEP_PRESETS,
     steps_for_run,
+    retry_call,
     setup_proxy,
 )
 
@@ -121,6 +122,14 @@ def parse_args() -> argparse.Namespace:
         "--extra", action="store_true",
         help="下载扩展 SFC 参数（100m风、降水细分、陆面、海洋等共24个额外变量）",
     )
+    p.add_argument(
+        "--retry", type=int, default=3,
+        help="下载失败重试次数（含首次尝试），默认 3",
+    )
+    p.add_argument(
+        "--retry-delay", type=float, default=60.0,
+        help="两次尝试之间的等待秒数，默认 60",
+    )
     return p.parse_args()
 
 
@@ -136,6 +145,8 @@ def download_fields(
     date=None,
     time=None,
     levelist=None,
+    retry: int = 3,
+    retry_delay: float = 60.0,
 ) -> tuple:
     """
     下载指定层类型的 GRIB2 字段。
@@ -182,7 +193,17 @@ def download_fields(
     extra = f" × {len(levelist)} 压力层" if levelist else ""
     print(f"\n[{label}] 正在下载 {len(params)} 变量 × {len(steps)} 步长{extra} ...")
 
-    result = client.retrieve(**req)
+    def _cleanup():
+        # 重试前删除上一轮残留的半文件，避免被追加写入
+        if grib_path.exists():
+            grib_path.unlink()
+
+    result = retry_call(
+        lambda: client.retrieve(**req),
+        retries=retry,
+        delay=retry_delay,
+        cleanup=_cleanup,
+    )
     size_mb = grib_path.stat().st_size / 1e6 if grib_path.exists() else 0
     print(f"[{label}] ✓  起报时间: {result.datetime} | 文件大小: {size_mb:.1f} MB")
     return grib_path, result.datetime
@@ -431,6 +452,7 @@ def main():
     sfc_grib, run_dt = download_fields(
         client, "sfc", sfc_params, steps, outdir,
         date=args.date, time=args.time,
+        retry=args.retry, retry_delay=args.retry_delay,
     )
     grib_files.append(sfc_grib)
 
@@ -440,6 +462,7 @@ def main():
             client, "pl", PARAMS_PL, steps, outdir,
             date=args.date, time=args.time,
             levelist=LEVELS_PL,
+            retry=args.retry, retry_delay=args.retry_delay,
         )
         grib_files.append(pl_grib)
 
