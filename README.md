@@ -22,11 +22,14 @@ ecmwf-zhejiang-opendata/
 │   ├── VERIFICATION_360H.md       # 360h 时效验证（修正早期 240h 错误）
 │   └── TEST_FOUR_CYCLES_FINAL.md  # 四时次完整实测报告
 ├── src/
+│   ├── ecmwf_common.py            # 单一来源：参数、压力层、步长、代理检测
 │   ├── download_ecmwf.py          # 单次下载：GRIB2 → 裁剪浙江 → NetCDF4
 │   ├── cron_fetch_ecmwf.py        # 业务化：自动起报时次 + 全时长 + 重试
 │   ├── cron_fetch_era5.py         # ERA5：GCS 公开桶直取
 │   └── requirements.txt
 └── tests/
+    ├── test_common_consistency.py # 定义一致性检查（离线，27 项）
+    ├── test_grib_to_netcdf.py     # 后处理回归（离线，用 samples/ 基准）
     ├── test_all_cycles.py         # 四时次并发测试（00z/12z 85步，06z/18z 31步）
     ├── test_06z_18z_3h.py         # 3h 步长实测（真实存在）
     └── test_06z_18z_latest.py     # 1h 步长验证（确认不存在）
@@ -40,6 +43,9 @@ ecmwf-zhejiang-opendata/
 # Python 3.9+
 pip install -r src/requirements.txt
 ```
+
+所有参数清单、压力层列表、步长预设与代理检测**只在 `src/ecmwf_common.py` 定义一次**，
+三个脚本共享，避免多处硬编码漂移。
 
 `eccodes` 是系统库，不能用 pip 装（必须 ≥ 2.25，支持 CCSDS/AEC 解码）：
 
@@ -82,6 +88,8 @@ python src/download_ecmwf.py --extra --no-pl
 # 业务化：自动推算最新可用起报时次
 python src/cron_fetch_ecmwf.py --params 2t,10u,10v,tp,msl --outdir /data/ecmwf
 ```
+
+> 起报时次为 06z/18z 时，`--steps full` 会自动裁剪为 0–90h（31 步），不会去请求不存在的 150–360h 时效。
 
 输出：
 
@@ -230,6 +238,8 @@ python src/download_ecmwf.py --proxy http://127.0.0.1:1082
 | `vsw`/`sot` 默认不在输出 | typeOfLevel=sol | 加 `--extra` |
 | 0.1° 无晴空辐射 | 官方暂未发布 | `tisr`/`ssrdc`/`strdc`/`fdir` 待公告 |
 | 06z/18z 无 1h 步长 | 官方文档有误 | 实际 3h/31 步，见 `docs/DATA_CHANNEL_SPEC.md` |
+| 单步 GRIB 无法算通量 | 累计量需前一步差分 | 该变量保留累计量、跳过通量转换并告警 |
+| `download_ecmwf.py` 无重试 | 仅 cron 脚本带重试 | 大请求（>1 GB）建议用 `cron_fetch_ecmwf.py` |
 
 ---
 
