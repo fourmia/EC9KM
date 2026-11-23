@@ -283,7 +283,7 @@ print(f'步长数: {n}（期望 85）')
 2. 步长规则：0–144h/3h + 150–360h/6h，共 **85 步**
 3. 单变量文件大小：**~112 MB**（2t）
 4. 脚本已修正，可正确下载 360h 完整时效
-5. 所有文档已更新（`DATA_CHANNEL_SPEC.md`、`ECMWF_0.1deg_parameters.md`）
+5. 所有文档已更新（`docs/DATA_CHANNEL_SPEC.md`、`docs/ecmwf_parameters.md`）
 
 ### ⚠️ 待确认
 
@@ -294,7 +294,7 @@ print(f'步长数: {n}（期望 85）')
 ### 📋 后续行动
 
 1. ✅ 脚本已修正并提交（`src/cron_fetch_ecmwf.py`）
-2. ✅ 文档已更新并提交（`DATA_CHANNEL_SPEC.md`、`ECMWF_0.1deg_parameters.md`）
+2. ✅ 文档已更新并提交（`docs/DATA_CHANNEL_SPEC.md`、`docs/ecmwf_parameters.md`）
 3. ⏳ 建议部署到生产环境前完整下载一次 **12 变量标准配置**，验证：
    - 实际文件大小（预期 ~1.3 GB）
    - 下载时间（预期 3–5 分钟，稳定代理）
