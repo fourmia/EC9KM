@@ -1,23 +1,36 @@
 # ecmwf-zhejiang-opendata
 
-ECMWF IFS 0.1°（≈9 km）开放数据下载工具 — 浙江省区域
+ECMWF 数据下载工具集 — 浙江省区域。两条独立数据线：
 
-从 ECMWF 免费开放数据中下载最新高分辨率数值预报，自动裁剪至浙江省，转为压缩 NetCDF4 输出，辐射量自动完成累计→通量转换。
+| 数据线 | 脚本 | 类型 | 分辨率 | 时效 | 时延 | 格式 |
+|--------|------|------|--------|------|------|------|
+| **IFS 0.1° 实时预报** | `src/download_ecmwf.py`<br>`src/cron_fetch_ecmwf.py` | 数值预报 | 0.1°（≈9 km） | 0–360h | ~9h | GRIB2 |
+| **ARCO-ERA5 再分析** | `src/cron_fetch_era5.py` | 历史再分析 | 0.25° | 1940 至今 | ~6 天 | NetCDF4 |
+
+实时预报取未来，再分析补历史。两者分辨率不同（0.1° 仅实时预报提供），不可互相替代。
 
 ---
 
-## 背景
+## 目录结构
 
-ECMWF 自 2026-10-20 起将 IFS 高分辨率预报（原内部约 9 km）以 **0.1° 分辨率**对外免费开放，与原有 0.25° 数据并行发布。文件采用 **GRIB2 + CCSDS（AEC）压缩**，按参数调整每值比特数（Bits per value）。数据授权协议为 **CC BY 4.0**（署名即可免费使用）。
-
-| 项目 | 值 |
-|------|----|
-| 分辨率 | 0.1°（≈9 km），3600 × 1801 全球格点 |
-| 起报时次 | 00z / 06z / 12z / 18z UTC |
-| 预报时效 | 00z/12z：0–144h（3h步）＋ 150–360h（6h步） |
-| 延迟 | 比 0.25° 晚约 2 小时发布 |
-| 并发限制 | ECMWF 官方 500–2000 连接；云镜像无限制 |
-| 授权 | CC BY 4.0 |
+```
+ecmwf-zhejiang-opendata/
+├── README.md
+├── docs/
+│   ├── ecmwf_parameters.md        # 参数核对报告（45 SFC + 10 PL × 14 层，三重来源验证）
+│   ├── DATA_CHANNEL_SPEC.md       # 数据通道规范（步长、文件大小、存储规划）
+│   ├── VERIFICATION_360H.md       # 360h 时效验证（修正早期 240h 错误）
+│   └── TEST_FOUR_CYCLES_FINAL.md  # 四时次完整实测报告
+├── src/
+│   ├── download_ecmwf.py          # 单次下载：GRIB2 → 裁剪浙江 → NetCDF4
+│   ├── cron_fetch_ecmwf.py        # 业务化：自动起报时次 + 全时长 + 重试
+│   ├── cron_fetch_era5.py         # ERA5：GCS 公开桶直取
+│   └── requirements.txt
+└── tests/
+    ├── test_all_cycles.py         # 四时次并发测试（00z/12z 85步，06z/18z 31步）
+    ├── test_06z_18z_3h.py         # 3h 步长实测（真实存在）
+    └── test_06z_18z_latest.py     # 1h 步长验证（确认不存在）
+```
 
 ---
 
@@ -25,55 +38,67 @@ ECMWF 自 2026-10-20 起将 IFS 高分辨率预报（原内部约 9 km）以 **0
 
 ```bash
 # Python 3.9+
-pip install ecmwf-opendata cfgrib xarray numpy netCDF4
+pip install -r src/requirements.txt
 ```
 
-eccodes 需支持 CCSDS/AEC 解码器（`eccodes >= 2.25`，cfgrib `>= 0.9.10`）：
+`eccodes` 是系统库，不能用 pip 装（必须 ≥ 2.25，支持 CCSDS/AEC 解码）：
 
 ```bash
-# macOS
-brew install eccodes
-
-# Ubuntu/Debian
-apt-get install libeccodes-dev
+brew install eccodes          # macOS
+apt-get install libeccodes-dev # Debian/Ubuntu
 ```
 
 ---
 
-## 快速开始
+## 一、IFS 0.1° 实时预报
+
+ECMWF 自 2026-10-20 起将 IFS 高分辨率预报（约 9 km）以 0.1° 免费开放，与 0.25° 并行发布。GRIB2 + CCSDS（AEC）压缩，按参数调整每值比特数。授权 **CC BY 4.0**。
+
+### 起报时次与时效（实测，已修正官方错误）
+
+| 时次 | 批次 | 时效 | 步长 | 步数 | 单变量大小 |
+|------|------|------|------|------|-----------|
+| 00z / 12z | 主批次 | 0–360h | 0–144h/3h + 150–360h/6h | **85** | ~117 MB |
+| 06z / 18z | 辅助批次 | 0–90h | **3h** | **31** | ~42 MB |
+
+> ⚠️ 官方文档称 06z/18z 为 1h/91 步，实测 GCS 无 1h 文件（404），实际仅 **3h/31 步**。
+> 地面层（`-sfc`）与压力层（`-pl`）**分文件发布**，均 0.1°，比 0.25° 晚约 2 小时。
+
+### 快速开始
 
 ```bash
-# 下载最新起报，短期（0–72h），仅地面层
+# 最新起报，短期（0–72h），仅地面层
 python src/download_ecmwf.py --no-pl
 
-# 指定起报时间，中期预报（0–120h）
+# 指定起报，中期（0–120h）
 python src/download_ecmwf.py --date 2026-10-22 --time 0 --steps medium
 
-# 完整 10 天，包含压力层
+# 完整 360h（85 步），含压力层
 python src/download_ecmwf.py --steps full
 
-# 下载全部 45 个 SFC 参数（含陆面/海洋等）
+# 全部 45 个 SFC 参数（陆面/海洋/海浪等）
 python src/download_ecmwf.py --extra --no-pl
+
+# 业务化：自动推算最新可用起报时次
+python src/cron_fetch_ecmwf.py --params 2t,10u,10v,tp,msl --outdir /data/ecmwf
 ```
 
-输出文件：
+输出：
 
 ```
 ecmwf_data/
-├── ecmwf_zj_sfc_20261022_00z.nc   # 地面层（50×54格点，压缩）
+├── ecmwf_zj_sfc_20261022_00z.nc   # 地面层（浙江裁剪，zlib 压缩）
 └── ecmwf_zj_pl_20261022_00z.nc    # 压力层（可选）
 ```
 
----
-
-## 全部参数说明
+### 命令行参数
 
 ```
 usage: download_ecmwf.py [-h]
   [--date DATE]         起报日期 YYYYMMDD 或 YYYY-MM-DD（默认：最新）
   [--time {0,6,12,18}]  起报时次 UTC（默认：最新）
   [--steps {short,medium,full}]
-                        short=0~72h | medium=0~120h | full=0~240h（默认：short）
+                        short=0~72h | medium=0~120h | full=0~360h（85步）
   [--source {aws,google,azure,ecmwf}]
                         数据源（默认：google）
   [--no-rad]            跳过辐射变量
@@ -85,83 +110,111 @@ usage: download_ecmwf.py [-h]
   [--grib-only]         仅下载 GRIB2，不转 NetCDF
 ```
 
-### 数据源选择
+### 数据源
 
-| source | 地址 | 速度限制 | 适用场景 |
-|--------|------|---------|---------|
+| source | 地址 | 限速 | 适用场景 |
+|--------|------|------|---------|
 | `google` | GCS `ecmwf-open-data` | 无 | **推荐**，国内代理稳定 |
 | `aws` | S3 `eu-central-1` | 无 | 部署在 AWS 时首选 |
 | `azure` | Azure Blob | 无（需 SAS token） | 部署在 Azure 时 |
 | `ecmwf` | data.ecmwf.int | 500–2000 并发 | 调试/备用 |
 
----
+### 输出变量
 
-## 输出变量说明
+**地面层（SFC）** — 默认 21 个核心变量，`--extra` 补足 45 个
 
-### 地面层（SFC）— 核心 21 个变量（默认下载）
-
-| 变量名（NetCDF） | shortName | 含义 | 单位 |
-|-----------------|-----------|------|------|
+| NetCDF 变量 | shortName | 含义 | 单位 |
+|------------|-----------|------|------|
 | `t2m` | `2t` | 2米气温 | K |
 | `d2m` | `2d` | 2米露点温度 | K |
 | `mn2t3` | `mn2t3` | 过去3h最低2米气温 | K |
 | `mx2t3` | `mx2t3` | 过去3h最高2米气温 | K |
 | `skt` | `skt` | 地皮温度 | K |
-| `u10` | `10u` | 10米纬向风 | m s⁻¹ |
-| `v10` | `10v` | 10米经向风 | m s⁻¹ |
-| `p49` | `10fg` | 10米最大阵风（过去3h） | m s⁻¹ |
-| `msl` | `msl` | 海平面气压 | Pa |
-| `sp` | `sp` | 地面气压 | Pa |
+| `u10` / `v10` | `10u` / `10v` | 10米风分量 | m s⁻¹ |
+| `p49` | `10fg` | 过去3h最大10米阵风 | m s⁻¹ |
+| `msl` / `sp` | `msl` / `sp` | 海平面气压 / 地面气压 | Pa |
 | `tp` | `tp` | 累计总降水 | m |
-| `tcc` | `tcc` | 总云量 | 0–1 |
-| `lcc` / `mcc` / `hcc` | — | 低/中/高云量 | 0–1 |
+| `tcc` / `lcc` / `mcc` / `hcc` | — | 总/低/中/高云量 | 0–1 |
 | `mucape` | `mucape` | 最不稳定CAPE | J kg⁻¹ |
-| `ssrd` | `ssrd` | 地面向下短波辐射通量（GHI基础） | **W m⁻²** |
+| `ssrd` | `ssrd` | 地面向下短波辐射**通量** | **W m⁻²** |
 | `ssrd_accum` | `ssrd` | 同上，原始累计量 | J m⁻² |
-| `ssr` / `strd` / `str` / `ttr` | — | 净短波/向下长波/净长波/OLR 通量 | **W m⁻²** |
+| `ssr` / `strd` / `str` / `ttr` | — | 净短波/向下长波/净长波/OLR **通量** | **W m⁻²** |
 
-> **辐射变量**：原始 GRIB 为累计量（J m⁻²），脚本自动差分转换为各步长平均通量（W m⁻²），同时保留原始累计量（`<var>_accum`）。向下辐射已 clip 至 ≥0（消除差分舍入误差）。
+> **辐射变量**：GRIB 原始为累计量（J m⁻²），脚本自动差分转换为各步长平均通量（W m⁻²），同时保留累计量（`<var>_accum`）。向下辐射已 clip 至 ≥0（消除差分舍入误差）；`str`/`ttr` 为净辐射，保留负值。
 
-### 压力层（PL）— 10 变量 × 14 层（10–1000 hPa）
+**压力层（PL）** — 10 变量 × 14 层（10–1000 hPa）
 
-`z`（位势）、`gh`（位势高度）、`t`（温度）、`u`/`v`（风场）、`w`（垂直速度）、`q`（比湿）、`r`（相对湿度）、`d`（散度）、`vo`（相对涡度）
+`z`（位势）、`gh`（位势高度）、`t`（温度）、`u`/`v`（风）、`w`（垂直速度）、`q`（比湿）、`r`（相对湿度）、`d`（散度）、`vo`（相对涡度）
+
+压力层：10, 50, 100, 150, 200, 250, 300, 400, 500, 600, 700, 850, 925, 1000 hPa
+
+### 读取示例
+
+```python
+import xarray as xr, numpy as np
+
+ds = xr.open_dataset("ecmwf_data/ecmwf_zj_sfc_20261022_00z.nc")
+
+t2m_c   = ds["t2m"] - 273.15                                    # K → °C
+ssrd_24 = ds["ssrd"].sel(step=np.timedelta64(24, "h"))           # W/m²
+tp_72   = ds["tp"].sel(step=np.timedelta64(72, "h")) * 1000      # m → mm
+ws10    = np.sqrt(ds["u10"]**2 + ds["v10"]**2)                   # 风速
+```
 
 ---
 
-## 读取输出文件示例
+## 二、ARCO-ERA5 再分析
 
-```python
-import xarray as xr
-import numpy as np
+从 GCS 公开桶 `gs://gcp-public-data-arco-era5` 直取，无需认证。0.25°（721×1440），1h 分辨率，1940 年至今，滞后约 6 天。
 
-# 打开地面层文件
-ds = xr.open_dataset("ecmwf_data/ecmwf_zj_sfc_20261022_00z.nc")
+### 快速开始
 
-# 2米气温（K → °C）
-t2m = ds["t2m"] - 273.15
+```bash
+# 查看要素预设
+python src/cron_fetch_era5.py --list-presets
 
-# 24h预报的地面向下短波辐射通量（W/m²）
-ssrd_24h = ds["ssrd"].sel(step=np.timedelta64(24, "h"))
+# 最新可用日期的标准要素集
+python src/cron_fetch_era5.py --outdir ./era5_data
 
-# 累计总降水（m → mm）
-tp_72h = ds["tp"].sel(step=np.timedelta64(72, "h")) * 1000
+# 指定日期 + 要素
+python src/cron_fetch_era5.py --date 2026-11-17 --params 2t,2d,10u,10v,tp,msl
 
-# 10米风速合成
-ws10 = np.sqrt(ds["u10"]**2 + ds["v10"]**2)
+# 压力层（指定变量与层次）
+python src/cron_fetch_era5.py --date 2026-11-17 --no-sfc --pl \
+    --pl-vars z,t,u,v,q --pl-levels 1000,925,850,700,500,300,200
 ```
+
+### 要素预设
+
+| 预设 | 变量 |
+|------|------|
+| `minimal` | 2t, 2d, 10u, 10v, tp, msl |
+| `standard` | 2t, 2d, 10u, 10v, 10fg, tp, msl, sp, tcc, cape, ssrd, strd |
+| `full_met` | 全部 27 个已映射地面变量 |
+
+支持 27 个地面变量与 7 个压力层变量（`z`/`t`/`u`/`v`/`w`/`q`/`r`）× 37 个标准层。
+
+### 实测参考（2026-10-28，经代理）
+
+- 单变量 `2t`：34 MB，24 时次 × 721 × 1440 格点
+- 温度范围 −59.5 ~ +43.9 °C（全球）
+- `minimal` 六变量：215 MB，全部成功，约 5 分钟
+
+### 与实时预报的分工
+
+- **补历史 / 训练样本** → ERA5
+- **未来 0–15 天预报** → IFS 0.1°
+
+ERA5 无 0.1° 版本；若业务要求 0.1°，只能用 IFS 实时预报。
 
 ---
 
 ## 网络与代理
 
-脚本在 macOS 上自动读取系统代理（通过 `scutil --proxy`）并注入 `HTTP_PROXY`/`HTTPS_PROXY` 环境变量，无需手动配置。Linux/Windows 服务器直连或设置环境变量：
+macOS 自动读取系统代理（`scutil --proxy`）并注入 `HTTP_PROXY`/`HTTPS_PROXY`，无需手动配置。Linux/Windows 用环境变量或 `--proxy`：
 
 ```bash
-# Linux 服务器
 export HTTPS_PROXY=http://proxy.example.com:1082
-python src/download_ecmwf.py
-
-# 手动指定
 python src/download_ecmwf.py --proxy http://127.0.0.1:1082
 ```
 
@@ -169,15 +222,23 @@ python src/download_ecmwf.py --proxy http://127.0.0.1:1082
 
 ## 已知问题
 
-| 问题 | 原因 | 处理方式 |
-|------|------|---------|
-| `10fg` 读为 `p49` | cfgrib 无标准 CF 名 | 已知，使用时按 `p49` 访问 |
-| `mn2t3`/`mx2t3` 合并冲突 | cfgrib 均读为 `t2m` | 已按 paramId 重命名，透明处理 |
-| `ssrd` 出现极小负值 | 差分舍入误差 | 已 clip≥0，`str`/`ttr` 保留负值 |
-| `vsw`/`sot` 默认不在输出 | typeOfLevel=sol | 加 `--extra` 下载 |
-| 0.1° 无晴空辐射 | 官方暂未发布 | `tisr`/`ssrdc`/`strdc`/`fdir` 待 ECMWF 公告 |
+| 问题 | 原因 | 处理 |
+|------|------|------|
+| `10fg` 读为 `p49` | cfgrib 无标准 CF 名 | 已知，按 `p49` 访问 |
+| `mn2t3`/`mx2t3` 覆盖 `t2m` | cfgrib 三者同读为 `t2m` | 已按 paramId 重命名，透明处理 |
+| `ssrd` 极小负值 | 差分舍入误差 | 已 clip≥0；`str`/`ttr` 保留负值 |
+| `vsw`/`sot` 默认不在输出 | typeOfLevel=sol | 加 `--extra` |
+| 0.1° 无晴空辐射 | 官方暂未发布 | `tisr`/`ssrdc`/`strdc`/`fdir` 待公告 |
+| 06z/18z 无 1h 步长 | 官方文档有误 | 实际 3h/31 步，见 `docs/DATA_CHANNEL_SPEC.md` |
 
 ---
+
+## 文档
+
+- [参数核对报告](docs/ecmwf_parameters.md) — 45 SFC + 10 PL × 14 层，GRIB index / eccodes / NetCDF 三重验证
+- [数据通道规范](docs/DATA_CHANNEL_SPEC.md) — 步长规律、文件大小、存储规划
+- [360h 时效验证](docs/VERIFICATION_360H.md) — 修正早期 240h 错误
+- [四时次实测报告](docs/TEST_FOUR_CYCLES_FINAL.md) — 00z/06z/12z/18z 完整测试
 
 ## 参考
 
@@ -185,4 +246,3 @@ python src/download_ecmwf.py --proxy http://127.0.0.1:1082
 - [0.1° 新特性说明](https://confluence.ecmwf.int/spaces/DAC/pages/738041087/)
 - [ecmwf-opendata PyPI](https://pypi.org/project/ecmwf-opendata/)
 - [ECMWF 参数数据库](https://codes.ecmwf.int/grib/param-db/)
-- [参数核对报告](docs/ecmwf_parameters.md)

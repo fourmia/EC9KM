@@ -102,7 +102,7 @@ PARAMS_SFC_MET = [
     "2d",     # 2米露点温度 (K)
     "10u",    # 10米纬向风 (m/s)
     "10v",    # 10米经向风 (m/s)
-    "10fg",   # 10米阵风 (m/s)
+    "10fg",   # 过去3小时最大10米阵风 (m/s)，stepType=max
     "mn2t3",  # 过去3小时最低2米气温 (K)
     "mx2t3",  # 过去3小时最高2米气温 (K)
     "msl",    # 海平面气压 (Pa)
@@ -123,7 +123,7 @@ PARAMS_SFC_RAD = [
     "strd",   # 地面向下长波（热红外）辐射
     "ssr",    # 地面净短波辐射
     "str",    # 地面净长波辐射
-    "ttr",    # 大气层顶净长波辐射（OLR，累计）
+    "ttr",    # 大气层顶净长波辐射（OLR，累计，向外为负）
 ]
 
 # 辐射变量名集合（用于后处理识别）
@@ -157,7 +157,7 @@ LEVELS_PL = [1000, 925, 850, 700, 600, 500, 400, 300, 250, 200, 150, 100, 50, 10
 STEP_PRESETS = {
     "short":  list(range(0, 73, 3)),                                    # 0~72h  / 3h
     "medium": list(range(0, 121, 3)),                                   # 0~120h / 3h
-    "full":   list(range(0, 145, 3)) + list(range(150, 241, 6)),        # 0~240h
+    "full":   list(range(0, 145, 3)) + list(range(150, 361, 6)),        # 0~360h / 85步
 }
 
 
@@ -179,7 +179,7 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument(
         "--steps", default="short", choices=list(STEP_PRESETS.keys()),
-        help="预报步长预设: short=0~72h | medium=0~120h | full=0~240h",
+        help="预报步长预设: short=0~72h | medium=0~120h | full=0~360h（85步）",
     )
     p.add_argument(
         "--no-rad", action="store_true",

@@ -1,5 +1,18 @@
+# ECMWF IFS 0.1° 实时预报（GRIB2）
+#   download_ecmwf.py / cron_fetch_ecmwf.py
 ecmwf-opendata>=0.3.35
 cfgrib>=0.9.10
+
+# ARCO-ERA5 历史再分析（NetCDF4）
+#   cron_fetch_era5.py
+requests>=2.28
+
+# 通用
 xarray>=2024.1
 numpy>=1.24
 netCDF4>=1.6
+
+# 注意：eccodes 为系统库，pip 装不上，需系统包管理器安装
+#   macOS : brew install eccodes
+#   Debian: apt-get install libeccodes-dev
+# 版本要求：eccodes >= 2.25（须支持 CCSDS/AEC 解码），cfgrib >= 0.9.10

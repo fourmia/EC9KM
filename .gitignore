@@ -6,3 +6,5 @@ ecmwf_data*/
 __pycache__/
 *.pyc
 .DS_Store
+downloads/
+test_all_cycles/
