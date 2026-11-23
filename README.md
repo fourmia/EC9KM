@@ -28,8 +28,9 @@ ecmwf-zhejiang-opendata/
 │   ├── cron_fetch_era5.py         # ERA5：GCS 公开桶直取
 │   └── requirements.txt
 └── tests/
-    ├── test_common_consistency.py # 定义一致性检查（离线，27 项）
+    ├── test_common_consistency.py # 定义一致性检查（离线）
     ├── test_grib_to_netcdf.py     # 后处理回归（离线，用 samples/ 基准）
+    ├── test_retry_call.py         # 重试原语行为测试（离线）
     ├── test_all_cycles.py         # 四时次并发测试（00z/12z 85步，06z/18z 31步）
     ├── test_06z_18z_3h.py         # 3h 步长实测（真实存在）
     └── test_06z_18z_latest.py     # 1h 步长验证（确认不存在）
@@ -44,7 +45,7 @@ ecmwf-zhejiang-opendata/
 pip install -r src/requirements.txt
 ```
 
-所有参数清单、压力层列表、步长预设与代理检测**只在 `src/ecmwf_common.py` 定义一次**，
+所有参数清单、压力层列表、步长预设、代理检测与重试原语**只在 `src/ecmwf_common.py` 定义一次**，
 三个脚本共享，避免多处硬编码漂移。
 
 `eccodes` 是系统库，不能用 pip 装（必须 ≥ 2.25，支持 CCSDS/AEC 解码）：
@@ -116,6 +117,8 @@ usage: download_ecmwf.py [-h]
   [--outdir OUTDIR]     输出目录（默认：./ecmwf_data）
   [--keep-grib]         保留原始 GRIB2（默认转NetCDF后删除）
   [--grib-only]         仅下载 GRIB2，不转 NetCDF
+  [--retry N]           下载失败重试次数（含首次，默认 3）
+  [--retry-delay SEC]   两次尝试之间的等待秒数（默认 60）
 ```
 
 ### 数据源
@@ -217,6 +220,16 @@ ERA5 无 0.1° 版本；若业务要求 0.1°，只能用 IFS 实时预报。
 
 ---
 
+## 测试
+
+```bash
+python3 tests/test_common_consistency.py   # 定义一致性（离线）
+python3 tests/test_retry_call.py           # 重试行为（离线）
+python3 tests/test_grib_to_netcdf.py       # 后处理回归（离线，需 cfgrib + samples/ 基准）
+```
+
+联网测试脚本（四时次、1h 步长验证）在 `tests/` 下，需代理与 `eccodes`。
+
 ## 网络与代理
 
 macOS 自动读取系统代理（`scutil --proxy`）并注入 `HTTP_PROXY`/`HTTPS_PROXY`，无需手动配置。Linux/Windows 用环境变量或 `--proxy`：
@@ -239,7 +252,7 @@ python src/download_ecmwf.py --proxy http://127.0.0.1:1082
 | 0.1° 无晴空辐射 | 官方暂未发布 | `tisr`/`ssrdc`/`strdc`/`fdir` 待公告 |
 | 06z/18z 无 1h 步长 | 官方文档有误 | 实际 3h/31 步，见 `docs/DATA_CHANNEL_SPEC.md` |
 | 单步 GRIB 无法算通量 | 累计量需前一步差分 | 该变量保留累计量、跳过通量转换并告警 |
-| `download_ecmwf.py` 无重试 | 仅 cron 脚本带重试 | 大请求（>1 GB）建议用 `cron_fetch_ecmwf.py` |
+| 大请求仍偶发截断 | 传输层不稳定 | 两个脚本均带重试（`--retry`），重试前自动删除半文件 |
 
 ---
 

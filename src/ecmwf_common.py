@@ -15,7 +15,8 @@ GRIB2 下载）都从这里取定义。任何参数或步长变更只改本文�
 
 import os
 import sys
-from typing import Optional
+import time
+from typing import Callable, Optional
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 地面层参数（sfc）
@@ -153,3 +154,55 @@ def setup_proxy(explicit: Optional[str] = None) -> Optional[str]:
         os.environ.setdefault("HTTPS_PROXY", proxy)
         return proxy
     return None
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# 重试（网络抖动 / 传输截断）
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+def retry_call(
+    func: Callable,
+    *args,
+    retries: int = 3,
+    delay: float = 60.0,
+    logger=None,
+    cleanup: Optional[Callable[[], None]] = None,
+    sleep: Optional[Callable[[float], None]] = None,
+    **kwargs,
+):
+    """
+    调用 func(*args, **kwargs)，失败自动重试。
+
+    ECMWF 大文件下载常见失败为传输截断（ecmwf-opendata 会抛
+    "File size mismatch ... instead of ..."），重试通常可恢复。
+
+    参数:
+        retries  : 总尝试次数（含首次），>=1
+        delay    : 两次尝试之间的等待秒数
+        logger   : 可选 logging.Logger；None 时用 print
+        cleanup  : 每次重试前调用，用于删除上一轮的残留半文件
+        sleep    : 便于测试注入（默认 time.sleep）
+
+    返回: func 的返回值
+    异常: 全部尝试失败后抛出最后一次异常
+    """
+    _sleep = sleep or time.sleep
+    retries = max(1, int(retries))
+    log_info = (logger.info if logger else print)
+    log_warn = ((logger.warning if hasattr(logger, "warning") else logger.info)
+                if logger else print)
+
+    for attempt in range(1, retries + 1):
+        try:
+            return func(*args, **kwargs)
+        except Exception as exc:  # noqa: BLE001 - 网络层异常类型不定
+            if attempt >= retries:
+                log_warn(f"✗ 尝试 {attempt}/{retries} 失败，放弃: {exc}")
+                raise
+            log_warn(f"✗ 尝试 {attempt}/{retries} 失败: {exc}")
+            if cleanup is not None:
+                try:
+                    cleanup()
+                except Exception:  # noqa: BLE001 - 清理失败不影响重试
+                    pass
+            log_info(f"  等待 {delay:g} 秒后重试 ...")
+            _sleep(delay)
+    raise RuntimeError("unreachable")
