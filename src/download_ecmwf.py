@@ -34,7 +34,6 @@ ECMWF IFS 0.1° 浙江省预报数据下载脚本
 
 import argparse
 import os
-import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -42,44 +41,22 @@ from typing import Optional
 
 import numpy as np
 
+# 共享定义（参数、层、步长、代理）—— 单一来源
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from ecmwf_common import (  # noqa: E402
+    PARAMS_SFC_MET,
+    PARAMS_SFC_RAD,
+    PARAMS_SFC_EXTRA,
+    PARAMS_SFC_ALL,
+    RAD_ACCUM_VARS,
+    RAD_DOWNWARD_VARS,
+    PARAMS_PL,
+    LEVELS_PL,
+    STEP_PRESETS,
+    steps_for_run,
+    setup_proxy,
+)
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# 代理自动检测（macOS 系统代理 → 环境变量）
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-def detect_system_proxy() -> Optional[str]:
-    """检测 macOS 系统代理设置，返回 http://host:port 或 None。"""
-    if sys.platform != "darwin":
-        return None
-    try:
-        out = subprocess.check_output(["scutil", "--proxy"], timeout=5).decode()
-        lines = out.strip().split("\n")
-        proxy = {}
-        for line in lines:
-            line = line.strip().rstrip(";")
-            if ":" in line:
-                k, v = line.split(":", 1)
-                proxy[k.strip()] = v.strip()
-        if proxy.get("HTTPSEnable") == "1" and proxy.get("HTTPSProxy"):
-            port = proxy.get("HTTPSPort", "443")
-            host = proxy["HTTPSProxy"]
-            return f"http://{host}:{port}"
-        if proxy.get("HTTPEnable") == "1" and proxy.get("HTTPProxy"):
-            port = proxy.get("HTTPPort", "80")
-            host = proxy["HTTPProxy"]
-            return f"http://{host}:{port}"
-    except Exception:
-        pass
-    return None
-
-
-def setup_proxy(explicit: Optional[str] = None):
-    """设置 HTTP_PROXY / HTTPS_PROXY 环境变量，让 requests 库走代理。"""
-    proxy = explicit or detect_system_proxy()
-    if proxy:
-        os.environ.setdefault("HTTP_PROXY", proxy)
-        os.environ.setdefault("HTTPS_PROXY", proxy)
-        return proxy
-    return None
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 浙江省边界框（含 0.2° 缓冲，覆盖舟山群岛）
@@ -90,76 +67,6 @@ BBOX = {
     "west":  117.8,  # 西界（开化以西）
     "east":  123.2,  # 东界（舟山外海）
 }
-
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# 变量配置
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-# 地面层 — 常用气象变量
-# 注：0p1 tier 实际可用参数以 index 文件为准，已验证
-PARAMS_SFC_MET = [
-    "2t",     # 2米气温 (K)
-    "2d",     # 2米露点温度 (K)
-    "10u",    # 10米纬向风 (m/s)
-    "10v",    # 10米经向风 (m/s)
-    "10fg",   # 过去3小时最大10米阵风 (m/s)，stepType=max
-    "mn2t3",  # 过去3小时最低2米气温 (K)
-    "mx2t3",  # 过去3小时最高2米气温 (K)
-    "msl",    # 海平面气压 (Pa)
-    "sp",     # 地面气压 (Pa)
-    "tp",     # 累计总降水 (m)
-    "tcc",    # 总云量 (0-1)
-    "lcc",    # 低云量 (0-1)
-    "mcc",    # 中云量 (0-1)
-    "hcc",    # 高云量 (0-1)
-    "mucape", # 最不稳定对流有效位能 (J/kg)
-    "skt",    # 皮温 (K)
-]
-
-# 地面层 — 辐射变量（原始为累计量 J/m²，脚本自动转 W/m²）
-# 注：0p1 tier 暂未提供 tisr/ssrdc/strdc/fdir，仅以下辐射可用
-PARAMS_SFC_RAD = [
-    "ssrd",   # 地面向下太阳短波辐射（GHI 分量基础）
-    "strd",   # 地面向下长波（热红外）辐射
-    "ssr",    # 地面净短波辐射
-    "str",    # 地面净长波辐射
-    "ttr",    # 大气层顶净长波辐射（OLR，累计，向外为负）
-]
-
-# 辐射变量名集合（用于后处理识别）
-RAD_ACCUM_VARS = set(PARAMS_SFC_RAD)
-# 向下辐射（物理上不可为负，差分误差 clip 到 0）
-RAD_DOWNWARD_VARS = {"ssrd", "ssr", "strd"}
-
-# 地面层 — 可选扩展变量（完整 45 个 SFC 参数的剩余部分，--extra 启用）
-PARAMS_SFC_EXTRA = [
-    "100u", "100v",                          # 100米风场（风能行业）
-    "cp", "sf", "ptype", "tprate",           # 降水细分
-    "tcwv", "tclw", "tciw", "tcrw", "tcw",  # 整层水汽与云水
-    "sd", "rsn", "asn", "ro", "vsw", "sot", # 陆面与土壤
-    "sithick", "zos", "lsm",                 # 海洋与静态场
-    "ewss", "nsss",                          # 湍流通量（累计量）
-    "sve", "svn",                            # 海浪
-]
-
-# 压力层变量（完整 10 个）
-PARAMS_PL = ["z", "gh", "t", "u", "v", "w", "q", "r", "d", "vo"]
-# z=位势, gh=位势高度, t=温度, u/v=风场, w=垂直速度
-# q=比湿, r=相对湿度, d=散度, vo=相对涡度
-
-# 标准压力层（hPa）—— 14层
-LEVELS_PL = [1000, 925, 850, 700, 600, 500, 400, 300, 250, 200, 150, 100, 50, 10]
-
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# 预报步长预设
-# IFS 00z/12z 标准输出节奏：0-144h/3h，150-360h/6h
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-STEP_PRESETS = {
-    "short":  list(range(0, 73, 3)),                                    # 0~72h  / 3h
-    "medium": list(range(0, 121, 3)),                                   # 0~120h / 3h
-    "full":   list(range(0, 145, 3)) + list(range(150, 361, 6)),        # 0~360h / 85步
-}
-
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 命令行参数
@@ -246,10 +153,31 @@ def download_fields(
     )
     if date is not None:
         req["date"] = date
-    if time is not None:
-        req["time"] = time
     if levelist is not None:
         req["levelist"] = levelist
+
+    # ── 起报时次：未指定时查询最新可用批次 ──────────────────────
+    if time is None:
+        probe = dict(type="fc", model="ifs", resol="0p1", levtype=levtype)
+        if date is not None:
+            probe["date"] = date
+        latest_dt = client.latest(**probe)
+        run_hour = latest_dt.hour
+        req["time"] = run_hour
+        if date is None:
+            req["date"] = int(latest_dt.strftime("%Y%m%d"))
+        print(f"[{label}] 自动选用最新可用起报: {latest_dt.strftime('%Y-%m-%d %Hz')}")
+    else:
+        run_hour = time
+        req["time"] = time
+
+    # ── 步长按批次裁剪：06z/18z 不提供 90h 之后时效 ─────────────
+    allowed = steps_for_run(run_hour)
+    if any(s not in set(allowed) for s in steps):
+        steps = [s for s in steps if s in set(allowed)]
+        req["step"] = steps
+        print(f"[{label}] ⚠  {run_hour:02d}z 批次时效上限 {max(allowed)}h，"
+              f"步长已裁剪为 {len(steps)} 步（0–{steps[-1]}h）")
 
     extra = f" × {len(levelist)} 压力层" if levelist else ""
     print(f"\n[{label}] 正在下载 {len(params)} 变量 × {len(steps)} 步长{extra} ...")
@@ -279,37 +207,42 @@ def deaccumulate_radiation(ds):
     if not rad_found or "step" not in ds.dims:
         return ds
 
-    # 步长 → 小时 → 各步时间间隔（秒）
-    steps_ns = ds.step.values
-    steps_h  = steps_ns.astype("timedelta64[h]").astype(float)
-    dt_h     = np.diff(steps_h, prepend=0.0)  # shape: (n_steps,)
-
     rename_map = {}
     new_flux   = {}
 
     for var in rad_found:
-        da = ds[var]  # dims: (step, latitude, longitude)
+        da = ds[var]
 
-        # 沿 step 轴差分：result[i] = da[i] - da[i-1]，shape 不变
-        # 用 numpy 直接操作，避免 xarray concat 坐标冲突
-        arr = da.values.copy()          # (n_steps, lat, lon)
-        arr[1:] = arr[1:] - arr[:-1]    # 差分
-        arr[0]  = 0.0                   # step=0 通量为 0
+        # 单步文件或该变量无 step 维时无法差分，保留累计量、跳过通量转换
+        if "step" not in da.dims:
+            print(f"  ⚠  {var} 无 step 维（单步数据），跳过通量转换")
+            continue
 
-        # 除以时间间隔（广播到 lat/lon）
-        dt = dt_h * 3600.0              # 秒
-        if arr.ndim == 3:               # (step, lat, lon)
-            dt = dt[:, np.newaxis, np.newaxis]
-        elif arr.ndim == 2:             # (step, lat) or (step, lon)
-            dt = dt[:, np.newaxis]
-        # dt==0 时（step=0）令通量=0，避免除零
-        dt_safe  = np.where(dt == 0, 1.0, dt)
+        # 每个变量独立取自己的步长坐标（合并后各变量坐标可能不同）
+        steps_h = da.step.values.astype("timedelta64[h]").astype(float)
+        if steps_h.size < 2:
+            print(f"  ⚠  {var} 仅 {steps_h.size} 步，无法差分，跳过通量转换")
+            continue
+        dt_s = np.diff(steps_h, prepend=0.0) * 3600.0   # 各步时间间隔（秒）
+
+        # step 维不一定在首轴：统一挪到首轴再做差分
+        axis = da.dims.index("step")
+        arr  = np.moveaxis(da.values.copy(), axis, 0)
+        arr[1:] = arr[1:] - arr[:-1]      # 差分
+        arr[0]  = 0.0                     # step=0 通量为 0
+
+        # 除以时间间隔（沿 step 轴广播；dt==0 时用 1 避免除零）
+        shape = [1] * arr.ndim
+        shape[0] = dt_s.size
+        dt_safe  = np.where(dt_s == 0, 1.0, dt_s).reshape(shape)
         flux_arr = arr / dt_safe
-        flux_arr[0] = 0.0  # 确保 step=0 通量为0
+        flux_arr[0] = 0.0                 # 确保 step=0 通量为 0
 
         # 向下辐射物理上不可为负（差分舍入误差），clip 到 0
         if var in RAD_DOWNWARD_VARS:
             flux_arr = np.where(flux_arr < 0, 0.0, flux_arr)
+
+        flux_arr = np.moveaxis(flux_arr, 0, axis)
 
         flux = xr.DataArray(
             flux_arr,
@@ -334,19 +267,8 @@ def deaccumulate_radiation(ds):
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 后处理②：GRIB2 → 裁剪浙江 → NetCDF
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# 完整 45 个 sfc GRIB shortName（以 index 文件验证为准）
-_SFC_SHORT_NAMES = [
-    # 核心气象（21个，已验证）
-    "10fg", "10u", "10v", "2d", "2t", "hcc", "lcc", "mcc",
-    "mn2t3", "msl", "mucape", "mx2t3", "skt", "sp",
-    "ssr", "ssrd", "str", "strd", "tcc", "tp", "ttr",
-    # 扩展参数（24个）
-    "100u", "100v",
-    "asn", "cp", "ewss", "lsm", "nsss", "ptype",
-    "ro", "rsn", "sd", "sf", "sithick", "sve", "svn",
-    "tciw", "tclw", "tcrw", "tcw", "tcwv", "tprate",
-    "vsw", "zos", "sot",
-]
+# 从 GRIB2 回读的 sfc 变量清单：即全部 45 个参数（避免与参数定义重复维护）
+_SFC_SHORT_NAMES = list(PARAMS_SFC_ALL)
 
 # mn2t3/mx2t3 与 2t 在 cfgrib 中都读成 t2m，按 paramId 区分
 _RENAME_BY_PARAMID = {

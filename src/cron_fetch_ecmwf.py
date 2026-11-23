@@ -10,7 +10,7 @@ ECMWF IFS 0.1° 业务化下载脚本（Cron 友好）
 
 特性:
   - 自动推算起报时间（滞后 8 小时避免数据未就绪）
-  - 下载所有可用时长（00z/12z: 0–240h, 06z/18z: 0–90h）
+  - 下载所有可用时长（00z/12z: 0–360h/85步, 06z/18z: 0–90h/3h/31步）
   - 失败自动重试（可配置次数和间隔）
   - 日志写文件 + stdout（cron 邮件友好）
   - 错误时退出码非 0
@@ -49,67 +49,14 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
-
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# 推荐要素列表（供参考）
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-RECOMMENDED_PARAMS = {
-    "minimal": [
-        "2t", "2d", "10u", "10v", "tp", "msl",  # 6个核心变量
-    ],
-    "standard": [
-        "2t", "2d", "10u", "10v", "tp", "msl", "sp", "tcc",
-        "10fg", "mucape", "ssrd", "strd",  # 12个常用变量
-    ],
-    "full_met": [
-        "2t", "2d", "mn2t3", "mx2t3", "skt",
-        "10u", "10v", "10fg", "100u", "100v",
-        "msl", "sp", "tp", "cp", "sf", "ptype",
-        "tcc", "lcc", "mcc", "hcc", "mucape",
-        "ssrd", "strd", "ssr", "str", "ttr",
-        "tcwv", "tclw", "tciw",  # 28个地面层气象变量
-    ],
-}
-
-
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# 代理自动检测（复用现有逻辑）
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-def detect_system_proxy() -> Optional[str]:
-    """检测 macOS 系统代理，Linux 返回 None（依赖环境变量）。"""
-    if sys.platform != "darwin":
-        return None
-    try:
-        import subprocess
-        out = subprocess.check_output(["scutil", "--proxy"], timeout=5).decode()
-        lines = out.strip().split("\n")
-        proxy = {}
-        for line in lines:
-            line = line.strip().rstrip(";")
-            if ":" in line:
-                k, v = line.split(":", 1)
-                proxy[k.strip()] = v.strip()
-        if proxy.get("HTTPSEnable") == "1" and proxy.get("HTTPSProxy"):
-            port = proxy.get("HTTPSPort", "443")
-            host = proxy["HTTPSProxy"]
-            return f"http://{host}:{port}"
-        if proxy.get("HTTPEnable") == "1" and proxy.get("HTTPProxy"):
-            port = proxy.get("HTTPPort", "80")
-            host = proxy["HTTPProxy"]
-            return f"http://{host}:{port}"
-    except Exception:
-        pass
-    return None
-
-
-def setup_proxy(explicit: Optional[str] = None):
-    """设置 HTTP_PROXY / HTTPS_PROXY 环境变量。"""
-    proxy = explicit or detect_system_proxy()
-    if proxy:
-        os.environ.setdefault("HTTP_PROXY", proxy)
-        os.environ.setdefault("HTTPS_PROXY", proxy)
-        return proxy
-    return None
+# 共享定义（参数、步长、代理）—— 单一来源
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from ecmwf_common import (  # noqa: E402
+    RECOMMENDED_PARAMS,
+    STEPS_MAIN,
+    steps_for_run,
+    setup_proxy,
+)
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -194,6 +141,14 @@ def download_with_retry(
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 命令行参数
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+def _parse_date(value: str) -> int:
+    """接受 YYYYMMDD 或 YYYY-MM-DD，统一返回 int（如 20261022）。"""
+    try:
+        return int(str(value).replace("-", ""))
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"日期格式无效: {value}（应为 YYYYMMDD 或 YYYY-MM-DD）")
+
+
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description="ECMWF IFS 0.1° 业务化下载（Cron 友好）",
@@ -205,8 +160,8 @@ def parse_args() -> argparse.Namespace:
         help="要素列表（逗号分隔），如: 2t,2d,10u,10v,tp,msl,ssrd",
     )
     p.add_argument(
-        "--date", type=int, default=None,
-        help="手动指定起报日期 YYYYMMDD（不指定则自动推算，滞后8小时）",
+        "--date", type=_parse_date, default=None,
+        help="手动指定起报日期 YYYYMMDD 或 YYYY-MM-DD（不指定则自动推算，滞后8小时）",
     )
     p.add_argument(
         "--time", type=int, default=None, choices=[0, 6, 12, 18],
@@ -292,15 +247,12 @@ def main():
         date, time_utc = infer_run_time(lag_hours=args.lag_hours)
         log.info(f"自动推算起报: {date} {time_utc:02d}z UTC（滞后 {args.lag_hours}h）")
     
-    # ── 确定预报步长（00z/12z 完整360h，06z/18z 仅 0–90h）────────
-    if time_utc in [0, 12]:
-        # 00z/12z: 0–144h/3h + 150–360h/6h (共 85 步)
-        steps = list(range(0, 145, 3)) + list(range(150, 361, 6))
-        log.info(f"预报步长: 0–360h（主运行批次，15天）")
+    # ── 确定预报步长（定义见 ecmwf_common.steps_for_run）──────────
+    steps = steps_for_run(time_utc)
+    if steps is STEPS_MAIN:
+        log.info(f"预报步长: 0–360h（主运行批次 00z/12z，{len(steps)} 步）")
     else:
-        # 06z/18z: 0–90h/3h（实测31步；1h步长文件不存在，官方文档有误）
-        steps = list(range(0, 91, 3))
-        log.info(f"预报步长: 0–90h（辅助批次，3h步长，31步）")
+        log.info(f"预报步长: 0–90h（辅助批次 06z/18z，3h 步长，{len(steps)} 步）")
     
     # ── 解析要素列表 ──────────────────────────────────────
     params = [p.strip() for p in args.params.split(",") if p.strip()]

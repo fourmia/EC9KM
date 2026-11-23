@@ -257,7 +257,13 @@ if var in RAD_DOWNWARD_VARS:
 
 ---
 
-## 五、快速下载
+## 五、定义来源
+
+所有参数清单、压力层列表与步长预设在 `src/ecmwf_common.py` 中定义一次，
+`download_ecmwf.py` 与 `cron_fetch_ecmwf.py` 共享，避免两处漂移。
+一致性由 `tests/test_common_consistency.py` 校验（离线，27 项断言）。
+
+## 六、快速下载
 
 ```bash
 # 安装

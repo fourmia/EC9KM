@@ -39,7 +39,6 @@ Crontab 示例（每天 06:00 CST 下载 6 天前数据）:
 import argparse
 import logging
 import os
-import subprocess
 import sys
 import time
 from datetime import datetime, timedelta, timezone
@@ -47,6 +46,13 @@ from pathlib import Path
 from typing import Optional
 
 import requests
+
+# 共享定义（代理自动检测）—— 单一来源
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from ecmwf_common import (  # noqa: E402
+    detect_system_proxy,
+    setup_proxy,
+)
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 存储桶基础 URL
@@ -122,37 +128,6 @@ PRESETS = {
                  "tcc", "cape", "ssrd", "strd"],
     "full_met": list(SFC_VAR_MAP.keys()),  # 全部已映射变量
 }
-
-
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# 代理自动检测
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-def detect_system_proxy() -> Optional[str]:
-    if sys.platform != "darwin":
-        return None
-    try:
-        out = subprocess.check_output(["scutil", "--proxy"], timeout=5).decode()
-        proxy = {}
-        for line in out.strip().split("\n"):
-            line = line.strip().rstrip(";")
-            if ":" in line:
-                k, v = line.split(":", 1)
-                proxy[k.strip()] = v.strip()
-        if proxy.get("HTTPSEnable") == "1" and proxy.get("HTTPSProxy"):
-            return f"http://{proxy['HTTPSProxy']}:{proxy.get('HTTPSPort', '443')}"
-        if proxy.get("HTTPEnable") == "1" and proxy.get("HTTPProxy"):
-            return f"http://{proxy['HTTPProxy']}:{proxy.get('HTTPPort', '80')}"
-    except Exception:
-        pass
-    return None
-
-
-def setup_proxy(explicit: Optional[str] = None) -> Optional[str]:
-    proxy = explicit or detect_system_proxy()
-    if proxy:
-        os.environ.setdefault("HTTP_PROXY", proxy)
-        os.environ.setdefault("HTTPS_PROXY", proxy)
-    return proxy
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
